@@ -1,0 +1,67 @@
+# context-harness project profile — copy to .context/config.yml and fill in.
+# This is the ONLY file you edit per project. The engine under
+# tools/harness/context-harness/ reads it and hard-codes nothing.
+
+project:
+  name: My Product # human name
+  slug: my-product # short kebab id (optional; derived if omitted)
+  description: One-line product summary
+  languages: [python] # e.g. [python, typescript, go]
+
+# Globs the gate watches. A non-exempt change under any of these requires a
+# context record for the PR. Use ** to cross directories.
+code_roots:
+  - "src/**"
+
+# Changes confined to these never require a record.
+exempt_globs:
+  - "**/*.md"
+  - "**/tests/**"
+  - ".github/**"
+
+# The doc the ledger treats as canonical reference architecture (optional; it is
+# what the architecture-drift detector compares each change against).
+reference_architecture: docs/ARCHITECTURE.md
+
+# Where the ledger lives. records_dir is required; the rest get sane defaults
+# under the same parent if omitted.
+ledger:
+  records_dir: docs/context/records
+  digests_dir: docs/context/digests
+  registry: docs/context/DECISION_REGISTRY.md
+  open_loops: docs/context/OPEN_LOOPS.md
+  topics: docs/context/TOPICS.md
+  overrides_log: docs/context/context-overrides.log
+  index_dir: docs/context/index
+
+# Seed vocabulary for Tier-2 topic keying (optional). Off-list tags are
+# accepted and curated later.
+topic_seeds: []
+
+# Synonym map for `ctx query` recall (optional). alias -> canonical. The
+# weekly reconcile's off-list curation feeds this over time.
+topic_aliases: {}
+#   throttling: rate-limiting
+#   authz: auth-trust-boundary
+
+# Risk → outcome-horizon + substance-review intensity (optional).
+risk_policy:
+  CRITICAL: { horizon: "deploy+7d", substance_review: human }
+  HIGH: { horizon: "deploy+14d", substance_review: human }
+  MEDIUM: { horizon: "deploy+30d", substance_review: auto }
+  LOW: { horizon: "merge+30d", substance_review: auto }
+
+# Generic role → your project's agent name(s). Used by the Historian write path.
+role_bindings:
+  intent: [product-manager]
+  engineer: [engineer]
+  testing: [testing]
+  security: [security]
+  risk: [change-manager]
+  retro: [release-manager]
+  historian: [context-keeper]
+
+enforcement:
+  skip_marker: "[skip-context]" # audited override marker
+  change_unit_key: pr_number
+  ci_check_name: "Context Check / per-change record present & valid"

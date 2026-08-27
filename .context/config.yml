@@ -1,0 +1,92 @@
+# ship-harness, configured for itself.
+#
+# This is a real, working config -- the harness dogfoods its own ledger and
+# agent rendering -- and it doubles as the worked example to copy. The engine
+# reads this and hard-codes nothing, so adopting the harness for a new project
+# is one install.py run plus edits to this one file.
+#
+# For the full menu of keys, see methodology-harness/config.example.yml.
+
+# ── context-ledger keys ────────────────────────────────────────────────────
+project:
+  name: ship-harness
+  slug: ship-harness
+  description: Portable development-methodology harness (ledger + enforced CI gates)
+  languages: [python]
+
+# A non-exempt change under any of these requires a context record.
+code_roots:
+  - "context-harness/ctx/**"
+  - "methodology-harness/scripts/**"
+
+# Changes confined to these never require a record.
+exempt_globs:
+  - "**/*.md"
+  - "**/tests/**"
+  - ".github/**"
+  - "**/*.lock"
+
+reference_architecture: README.md
+
+ledger:
+  records_dir: docs/context/records
+  digests_dir: docs/context/digests
+  registry: docs/context/DECISION_REGISTRY.md
+  open_loops: docs/context/OPEN_LOOPS.md
+  topics: docs/context/TOPICS.md
+  overrides_log: docs/context/context-overrides.log
+  index_dir: docs/context/index
+
+topic_seeds:
+  - ci-enforcement
+  - ledger-schema
+  - agent-rendering
+  - portability
+topic_aliases: {}
+
+risk_policy:
+  CRITICAL: { horizon: "deploy+7d", substance_review: human }
+  HIGH: { horizon: "deploy+14d", substance_review: human }
+  MEDIUM: { horizon: "deploy+30d", substance_review: auto }
+  LOW: { horizon: "merge+30d", substance_review: auto }
+
+role_bindings:
+  intent: [product-manager]
+  engineer: [engineer]
+  testing: [testing]
+  security: [security]
+  risk: [change-manager]
+  retro: [release-manager]
+  historian: [context-keeper]
+
+enforcement:
+  skip_marker: "[skip-context]"
+  change_unit_key: pr_number
+  ci_check_name: "Context Check / per-change record present & valid"
+
+# ── methodology keys ───────────────────────────────────────────────────────
+
+# The master switch: gate steps are rendered only for languages listed here.
+languages:
+  - id: python
+    detect: ["**/*.py"]
+    lint: "ruff check --output-format=json {files}"
+    format: "ruff format --check {files}"
+    test: "pytest {dir}"
+    runtime: "3.12"
+
+# This repo is a single Python package, not a service fleet, so `services` is
+# empty and the selective-CI matrix collapses to one job. A multi-service
+# adopter lists each service here; see config.example.yml for the shape.
+services: []
+
+version_check:
+  components: []
+
+gates:
+  code_quality: { enabled: true, required: true, check_name: "Lint / ruff" }
+  security_scan: { enabled: false, required: false }
+  security_sca: { enabled: false, required: false }
+  security_llm: { enabled: false, required: false }
+  change_review: { enabled: false, required: false }
+  version_check: { enabled: false, required: false }

@@ -1,0 +1,48 @@
+name: Security
+
+# Generic Semgrep diff-scan gate. Only NEW findings (vs the PR
+# base) block. Rulesets come from gates.security.configs in .context/config.yml
+# (default includes p/secrets). SARIF is uploaded to the Security tab when
+# gates.security.sarif_upload is true. Semgrep version is PINNED below.
+#
+# Override: [skip-security-scan] in any commit message in the PR range (logged).
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write # for the SARIF upload
+
+jobs:
+  security:
+    name: Security
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container:
+      image: semgrep/semgrep:1.78.0 # PINNED — no floating CLI
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Mark workspace safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Semgrep diff scan
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python tools/harness/methodology-harness/scripts/run_security_scan.py --sarif semgrep.sarif
+
+      # Surfaces findings in the Security tab. Requires GitHub Advanced Security
+      # (or a public repo). Harmless to keep; skip by setting sarif_upload:false.
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+        continue-on-error: true

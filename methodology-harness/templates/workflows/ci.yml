@@ -1,0 +1,115 @@
+name: CI
+
+# Generic test matrix + the CI Success fan-in. The matrix is built
+# from services[] in .context/config.yml (build_ci_matrix.py), so adding a
+# service is a config edit, not a YAML copy-paste. "CI Success" is the single
+# stable required status check that makes the whole matrix enforceable
+# (enforcement_check.py verifies branch protection requires it).
+#
+# Selective CI: `--selective` resolves the PR diff against the `ci:` dependency
+# graph in .context/config.yml and emits ONLY the affected services as the
+# matrix (the `test` job is skipped when the matrix is empty -> CI Success still
+# passes). On push (no PR base) it falls back to the full matrix. The graph
+# (folders -> services, shared-group fan-out, full_matrix_on) lives in config,
+# not hand-maintained here.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  matrix:
+    name: Build test matrix
+    runs-on: ubuntu-latest
+    outputs:
+      services: ${{ steps.gen.outputs.services }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so the BASE...HEAD merge-base is reachable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pyyaml==6.0.1
+      - id: gen
+        env:
+          # PR: diff against base. Push: diff the pushed range (before...after).
+          # Either absent/unreachable -> the script falls back to the full matrix.
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python tools/harness/methodology-harness/scripts/build_ci_matrix.py --selective
+
+  test:
+    name: Test / ${{ matrix.service.name }}
+    needs: matrix
+    if: ${{ needs.matrix.outputs.services != '[]' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJson(needs.matrix.outputs.services) }}
+    # Common backend service containers. A project trims/extends these; GitHub
+    # services can't be per-matrix-entry, so the union of what services need
+    # lives here (cheap when unused).
+    services:
+      mongodb:
+        image: mongo:7.0
+        ports: ["27017:27017"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - if: matrix.service.lang == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.service.runtime }}
+      - if: matrix.service.lang == 'python'
+        run: pip install -r ${{ matrix.service.path }}/requirements.txt
+
+      - if: matrix.service.lang == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.service.runtime || '20' }}
+      - if: matrix.service.lang == 'node'
+        working-directory: ${{ matrix.service.path }}
+        run: npm ci
+
+      - if: matrix.service.lang == 'dart'
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ matrix.service.runtime }}
+          channel: stable
+
+      - name: Test ${{ matrix.service.name }}
+        run: ${{ matrix.service.test }}
+
+  ci-success:
+    name: CI Success
+    needs: [matrix, test]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify the matrix succeeded
+        env:
+          MATRIX_RESULT: ${{ needs.matrix.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          echo "matrix=$MATRIX_RESULT test=$TEST_RESULT"
+          # 'test' may be 'skipped' only when there are zero services (empty
+          # matrix) -> that's a pass. failure/cancelled in either is fatal.
+          for r in "$MATRIX_RESULT" "$TEST_RESULT"; do
+            if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
+              echo "::error::A required CI job did not succeed."
+              exit 1
+            fi
+          done
+          echo "All required CI jobs succeeded."

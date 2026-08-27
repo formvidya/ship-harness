@@ -1,0 +1,71 @@
+name: Security SCA
+
+# Generic dependency-CVE (SCA) gate, security-pipeline Layer 1. The
+# semgrep gate scans the project's code (SAST); this scans its dependency tree
+# for known CVEs via osv-scanner (multi-ecosystem). Everything project-specific
+# (engine, fail_on severities, watched manifests, scan_root) lives in
+# gates.security_sca in .context/config.yml — the workflow hard-codes nothing.
+# The scan runs only when a dependency manifest changed, but the job always
+# reports, so it is safe as a required check. Blocks on fail_on severities.
+#
+# Override: [skip-security-sca] in any commit message in the PR range (logged).
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: security-sca-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write # for the SARIF upload
+
+jobs:
+  sca:
+    name: Security / sca (dependency CVEs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pyyaml==6.0.1
+
+      # Cheap precheck (no osv-scanner): did a watched manifest change? Gates the
+      # expensive install below so an unrelated PR pays nothing.
+      - name: Decide whether to scan
+        id: decide
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python tools/harness/methodology-harness/scripts/run_sca_scan.py --should-scan
+
+      # osv-scanner PINNED to v1 (v2 changed the CLI flags build_scan_argv emits).
+      - uses: actions/setup-go@v5
+        if: steps.decide.outputs.scan == 'true'
+        with:
+          go-version: "1.22"
+      - if: steps.decide.outputs.scan == 'true'
+        run: go install github.com/google/osv-scanner/cmd/osv-scanner@v1.9.2
+
+      - name: SCA scan (dependency CVEs)
+        if: steps.decide.outputs.scan == 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python tools/harness/methodology-harness/scripts/run_sca_scan.py --sarif osv.sarif
+
+      - name: Upload SARIF
+        if: always() && hashFiles('osv.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: osv.sarif
+        continue-on-error: true

@@ -1,0 +1,39 @@
+name: Version Check
+
+# Generic version-bump gate. A PR that changes a versioned
+# component's source must bump that component's version. All project specifics
+# (which dirs are versioned, which version-file format) come from
+# .context/config.yml (version_check.components). Make "Version Check" a required
+# status check (enforcement_check.py verifies that it is).
+#
+# Override: [skip-version-check] in any commit message in the PR range (logged).
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: version-check-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  version-check:
+    name: Version Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pyyaml==6.0.1
+      - name: Check version bumps
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python tools/harness/methodology-harness/scripts/check_version_bumps.py

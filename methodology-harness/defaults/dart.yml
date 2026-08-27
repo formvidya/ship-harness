@@ -1,0 +1,8 @@
+# Language preset: dart / flutter. Merge into a `languages[]` entry.
+id: dart
+detect: ["**/*.dart"]
+format: "dart format --output=none --set-exit-if-changed {dir}"
+lint: "flutter analyze {dir}"
+test: "flutter test"
+runtime: "3.29.0" # flutter version
+security_configs: [p/dart]

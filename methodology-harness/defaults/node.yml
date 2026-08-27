@@ -1,0 +1,8 @@
+# Language preset: node / typescript. Merge into a `languages[]` entry.
+id: node
+detect: ["**/*.ts", "**/*.tsx", "**/*.js"]
+format: "prettier --check {files}"
+lint: "eslint -f json {files}"
+test: "npm ci && npm test" # npm ci (locked), not npm install
+config_file: package.json
+security_configs: [p/javascript, p/owasp-top-ten]

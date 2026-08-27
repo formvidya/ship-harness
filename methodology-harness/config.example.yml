@@ -1,0 +1,194 @@
+# methodology-harness project profile — copy to .context/config.yml and fill in.
+# Superset of the context-harness config: the same fill-once file
+# drives BOTH the context ledger AND the full methodology (gates + agents).
+# The engine reads this and hard-codes nothing.
+
+# ── context-ledger keys ────────────────────────────────────────────────────
+project:
+  name: My Product
+  slug: my-product
+  description: One-line product summary
+  languages: [python] # informational; the authoritative list is `languages:` below
+
+code_roots: ["src/**"] # a non-exempt change here requires a context record
+exempt_globs: ["**/*.md", "**/tests/**", ".github/**"]
+reference_architecture: docs/ARCHITECTURE.md
+
+ledger:
+  records_dir: docs/context/records
+  digests_dir: docs/context/digests
+  registry: docs/context/DECISION_REGISTRY.md
+  open_loops: docs/context/OPEN_LOOPS.md
+  topics: docs/context/TOPICS.md
+  overrides_log: docs/context/context-overrides.log
+  index_dir: docs/context/index
+
+topic_seeds: []
+topic_aliases: {}
+risk_policy:
+  CRITICAL: { horizon: "deploy+7d", substance_review: human }
+  HIGH: { horizon: "deploy+14d", substance_review: human }
+  MEDIUM: { horizon: "deploy+30d", substance_review: auto }
+  LOW: { horizon: "merge+30d", substance_review: auto }
+role_bindings:
+  intent: [product-manager]
+  engineer: [engineer]
+  testing: [testing]
+  security: [security]
+  risk: [change-manager]
+  retro: [release-manager]
+  historian: [context-keeper]
+enforcement:
+  skip_marker: "[skip-context]"
+  change_unit_key: pr_number
+  ci_check_name: "Context Check / per-change record present & valid"
+
+# ── methodology keys ───────────────────────────────────────────────────────
+
+# The MASTER SWITCH. Each declared language is an adapter; the installer renders
+# gate steps only for languages you list. Pull presets from defaults/<id>.yml.
+languages:
+  - id: python
+    detect: ["**/*.py"]
+    lint: "ruff check --output-format=json {files}"
+    format: "ruff format --check {files}"
+    test: "pytest --cov --cov-fail-under={cov} {dir}"
+    cov: 80
+    runtime: "3.11"
+    dev_requirements: requirements-dev.txt # pinned — not ad-hoc `pip install`
+
+# One source of truth for the CI matrix, image build, rollout, and scan scope.
+# ci_key = the stable per-service CI gating output; depends_on = shared groups
+# (see `ci:` below) the service is rebuilt for.
+services:
+  - {
+      name: my-service,
+      ci_key: mysvc,
+      lang: python,
+      path: src,
+      depends_on: [shared],
+      needs: [],
+      version_file: VERSION,
+    }
+
+# Selective-CI dependency graph (build_ci_matrix.py): which folders map to which
+# services/jobs, so a PR runs only the jobs it affects. shared_groups = fan-out
+# edges (a group may itself depend_on another group); full_matrix_on = paths that
+# force the full matrix; extra_jobs = non-service jobs with their own triggers.
+ci:
+  shared_groups:
+    shared: { paths: ["shared/**", "libs/**"] }
+  full_matrix_on: [".github/workflows/ci.yml", ".context/config.yml"]
+  extra_jobs:
+    harness: { paths: ["tools/harness/methodology-harness/**"] }
+
+version_check:
+  components: # reader registry — generalize beyond services/**/VERSION
+    - { discover: glob, root: services, version_file: VERSION, format: semver }
+  changelog: { path: VERSIONS.md, require_entry: false }
+
+# Every gate: enabled, required (→ enforcement_check verifies branch protection
+# actually requires it), and its stable check_name.
+gates:
+  ci: { required_check: "CI Success" } # the test-matrix fan-in
+  code_quality: { enabled: true, required: true, check_name: "Code Quality" }
+  security:
+    {
+      enabled: true,
+      required: true,
+      check_name: "Security",
+      engine: semgrep,
+      image: "semgrep/semgrep:1.78.0",
+      configs: [p/python, p/owasp-top-ten, p/secrets],
+      sarif_upload: true,
+      override_label: security-override,
+    }
+  version_check: { enabled: true, required: true, check_name: "Version Check" }
+  change_review: {
+      enabled: true,
+      required: true,
+      check_name: "change-review",
+      approval: { mode: label, require_non_author: true, bind_to_sha: true },
+      # Risk rules for classify.py. Content `signals` run on CODE only (a docs
+      # file mentioning a keyword doesn't false-flag); protected_paths always escalate.
+      risk:
+        {
+          protected_paths: ["**/auth*.py", "**/*.tf", "infrastructure/**"],
+          safe_nonservice:
+            ["docs/**", "tools/**", ".github/**", ".context/**", ".claude/**", "**/*.md"],
+          signals:
+            [
+              { name: secrets, path_glob: "**", added_regex: "(JWT_SECRET|API_KEY)\\s*=" },
+              { name: dockerfile_port, path_glob: "**/Dockerfile", added_regex: "EXPOSE\\s" },
+            ],
+        },
+    }
+  # Security pipeline Layer 1 — dependency-CVE (SCA) gate (osv-scanner: multi-ecosystem).
+  security_sca:
+    {
+      enabled: true,
+      required: true,
+      check_name: "Security / sca",
+      engine: osv-scanner,
+      fail_on: [high, critical],
+      block_unknown: true,
+      manifests: ["**/requirements*.txt", "**/package-lock.json", "**/go.sum"],
+      sarif_upload: true,
+    }
+  # Security pipeline Layer 2 — predictive LLM reviewer. Ship required:false
+  # (advisory) first; flip required:true + escalate_to_human.enabled:true at
+  # Phase 3 once shadow FP data is clean. Needs the ANTHROPIC_API_KEY secret.
+  security_llm:
+    enabled: true
+    required: false
+    check_name: "security-llm-review"
+    invocation: { mode: claude_api, model: claude-opus-4-x, prompt_version: v1, temperature: 0 }
+    scope:
+      trigger_paths: ["src/**/api/**", "**/*auth*", "**/*session*"]
+      guard_globs: ["**/auth/**", "**/*deps*.py"]
+      max_files: 25
+    verification: { refuter_enabled: true, require_exploit_path: true }
+    policy:
+      { escalate_to_human: { severity: [critical, high], confidence: [high], enabled: false } }
+    approval: {
+        escalation_label: security-review-required,
+        clearance_label: security-cleared,
+        require_non_author: true, # solo: false
+        bind_to_sha: true,
+      }
+
+deploy:
+  provider: ghcr # ghcr|docr|ecr → registry login snippet
+  orchestrator: kustomize # kustomize|helm|compose
+  environments:
+    staging: { namespace: staging, smoke: { base_url: "", critical_paths: [] } }
+    prod: { namespace: prod, smoke: { base_url: "", critical_paths: [] } }
+  safety:
+    force_apply: false
+    grace_period: graceful
+    rollback_on_smoke_fail: true
+    skip_tests_requires_approval: true
+
+# Drives the rendered engineer/support agent profiles.
+agent_profiles:
+  roles:
+    - {
+        slug: engineer,
+        title: "Engineer",
+        tools: "Read,Edit,Write,Glob,Grep,Bash",
+        key_paths: [src],
+      }
+  fleet: { formatting_owner: formatter, duplication_owner: semantic-overlap }
+
+observability: # audit_logging.py
+  scan: { roots: ["src"], language: python }
+  score: { fail_under: 70 }
+
+# render_agents.py: the agent fleet is rendered from .context/agents/<name>.md
+# (frontmatter + project body) + the shared scaffold, so .claude/agents and docs
+# can't drift. These are the {{tokens}} the scaffold substitutes.
+methodology:
+  agents_src: .context/agents
+  prd_dir: docs/prd
+  ctx_cmd: python tools/harness/context-harness/ctx/ctx.py
+  ledger_contract: docs/agents/CONTEXT_LEDGER.md

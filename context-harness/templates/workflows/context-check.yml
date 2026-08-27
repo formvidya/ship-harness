@@ -1,0 +1,49 @@
+name: Context Check
+
+# The load-bearing enforcement layer for the context ledger:
+# a PR that changes a code-root file (per .context/config.yml) must also add or
+# update a valid context record. Direct clone of version-check.yml; the checker
+# (tools/harness/context-harness/ctx/check_context_record.py) clones check_version_bumps.py.
+#
+# Override: include "[skip-context]" in any commit message in the PR range
+# (printed to the run log + appended to docs/context/context-overrides.log).
+#
+# Make "Context Check / per-change record present & valid" a REQUIRED status
+# check in branch protection — it is the only layer covering a human merging via
+# the GitHub web UI.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited]
+
+concurrency:
+  group: context-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  context-check:
+    name: Context Check / per-change record present & valid
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out PR with full history
+        uses: actions/checkout@v4
+        with:
+          # The checker diffs BASE..HEAD; both SHAs must be reachable.
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PyYAML
+        run: pip install pyyaml==6.0.1
+
+      - name: Validate context record covers the diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python tools/harness/context-harness/ctx/check_context_record.py

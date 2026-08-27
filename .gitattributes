@@ -1,0 +1,15 @@
+# Normalize to LF in the repository for every text file.
+* text=auto eol=lf
+
+# These must be LF in the WORKING COPY too, not just in the object store.
+# A hook or entrypoint checked out with CRLF fails at the shebang line with a
+# bare "not found", which is a genuinely confusing way to lose an afternoon.
+*.sh text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Never touched.
+*.png binary
+*.jpg binary
+*.zip binary

@@ -1,0 +1,53 @@
+name: Code Quality
+
+# Generic, language-conditional code-quality gate. Runs each
+# DECLARED language's format-check + lint (from languages[] in .context/config.yml)
+# on that language's files in the PR diff. No hard-coded tools.
+#
+# Toolchain setup below covers the common stacks (Python+ruff, Node+prettier).
+# A project that declares `dart` adds a flutter-action setup step; one that uses
+# eslint adds `npm ci` for its config. The SCRIPT is fully generic; this setup
+# block is the one place a project tailors its toolchain.
+#
+# Override: [skip-quality-check] in any commit message in the PR range (logged).
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: code-quality-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  code-quality:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pyyaml==6.0.1 ruff==0.4.7
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm install -g prettier@3.2.5
+
+      # Projects that declare `dart` add, here:
+      #   - uses: subosito/flutter-action@v2
+      #     with: { flutter-version: "3.29.0", channel: stable }
+
+      - name: Run code-quality on the PR diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python tools/harness/methodology-harness/scripts/check_code_quality.py

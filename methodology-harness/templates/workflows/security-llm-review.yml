@@ -1,0 +1,98 @@
+name: Security LLM Review
+
+# Generic predictive LLM security reviewer (pipeline Layer 2). Two
+# jobs: `review` (continue-on-error) runs the model and posts findings/SARIF/a
+# rollup comment but NEVER reddens the build; `gate` is the deterministic,
+# no-LLM required check (`security-llm-review`) that owns the merge. Everything
+# project-specific (model, prompts, trigger paths, guard files, labels, policy)
+# lives in gates.security_llm in .context/config.yml. Phase 1 = ADVISORY.
+# Activate with the ANTHROPIC_API_KEY secret; without it the review job no-ops
+# and the gate still passes.
+#
+# Override: [skip-security-llm] in any commit message in the PR range.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
+
+concurrency:
+  group: security-llm-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write # apply/remove the escalation label (Phase 3)
+  security-events: write
+
+jobs:
+  review:
+    name: security-llm (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pyyaml==6.0.1 anthropic
+
+      - name: LLM review (detector + adversarial refuter)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # --emit-pr reconciles the escalation label; no-op unless
+          # policy.escalate_to_human.enabled (Phase 3).
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python tools/harness/methodology-harness/scripts/run_llm_review.py --sarif llm.sarif --comment-out llm-comment.md --emit-pr
+
+      - name: Post / update rollup comment
+        if: hashFiles('llm-comment.md') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          MARKER='<!-- llm-security-review -->'
+          ID=$(gh api "repos/$REPO/issues/$PR/comments" --jq "[.[] | select(.body | contains(\"$MARKER\"))][0].id // empty")
+          if [ -n "$ID" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$ID" -F body=@llm-comment.md >/dev/null
+          else
+            gh api -X POST "repos/$REPO/issues/$PR/comments" -F body=@llm-comment.md >/dev/null
+          fi
+
+      - name: Upload SARIF
+        if: always() && hashFiles('llm.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: llm.sarif
+          category: security-llm
+        continue-on-error: true
+
+  gate:
+    name: security-llm-review
+    needs: review
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pyyaml==6.0.1
+      - name: Clearance gate (deterministic, no LLM)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python tools/harness/methodology-harness/scripts/llm_review_gate.py

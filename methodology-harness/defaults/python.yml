@@ -1,0 +1,11 @@
+# Language preset: python. Merge into a `languages[]` entry; override per project.
+id: python
+detect: ["**/*.py"]
+lint: "ruff check --output-format=json {files}"
+format: "ruff format --check {files}"
+test: "pytest --cov --cov-fail-under={cov} {dir}"
+cov: 80
+runtime: "3.11"
+config_file: pyproject.toml
+dev_requirements: requirements-dev.txt # pinned test/tool deps — not ad-hoc pip install
+security_configs: [p/python, p/owasp-top-ten, p/secrets]

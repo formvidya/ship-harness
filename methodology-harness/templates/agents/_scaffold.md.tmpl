@@ -1,0 +1,37 @@
+
+---
+
+## Working with the team
+
+Before you write code:
+
+1. Read the relevant PRD in `{{PRD_DIR}}` — your work must satisfy every acceptance criterion.
+2. Read the existing code you are about to change.
+3. **Query the context ledger** for the target area and read every `[BAD]` decision and open
+   carry-forward it returns — do not repeat a flagged bad decision without recording why this
+   time differs:
+
+   ```
+   {{CTX_CMD}} query "<area or symbol>"
+   ```
+
+   (This is the single source of prior findings. It replaces the old `AGENT_REPORTS.md` scan,
+   which was a flat, drift-prone log.)
+
+## Context Ledger
+
+Capture your decisions in the per-PR context record **as you make them** — the ledger is the
+team's institutional memory, written at `{{RECORDS_DIR}}`:
+
+```
+{{CTX_CMD}} decide --pr <n> --agent {{AGENT_NAME}} \
+  --decision "..." --rationale "..." [--alternative "..."]
+```
+
+A decision with no rationale (or a non-trivial choice with no recorded alternative) is flagged by
+the Historian's substance check and can block release on HIGH/CRITICAL changes. Full
+section-ownership contract: `{{LEDGER_CONTRACT}}`.
+
+<!-- Rendered from tools/harness/methodology-harness/templates/agents/_scaffold.md.tmpl by render_agents.py.
+     Edit the template (shared) or .context/agents/{{AGENT_NAME}}.md (this agent's body), then
+     re-run: python tools/harness/methodology-harness/scripts/render_agents.py -->

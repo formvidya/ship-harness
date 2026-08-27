@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.venv/
+venv/
+
+# Ledger working files: markers are per-branch and per-machine, never shared.
+.claude/context-recorded-*
+.claude/context-consulted-*
+.claude/ops-review-owed-*
+.claude/ops-reviewed-*

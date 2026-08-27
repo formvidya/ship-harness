@@ -1,0 +1,123 @@
+name: CI
+
+# The harness testing itself. Public repo, so minutes are free -- but keep this
+# honest rather than broad: every job here must be able to FAIL, and a step that
+# cannot fail is worse than no step, because it reports green either way.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Tests / python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v7
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: pip install pyyaml==6.0.1 pytest httpx
+
+      - name: Unit tests
+        run: python -m pytest methodology-harness/tests/ context-harness/tests/ -q
+
+      - name: Agents are in sync with their source (no hand-edited drift)
+        run: python methodology-harness/scripts/render_agents.py --check
+
+  secrets:
+    name: Secrets / gitleaks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # The gitleaks CLI, not gitleaks-action. The action refuses to run on any
+    # ORGANIZATION-owned repository without a paid licence key -- it exits with
+    # "missing gitleaks license" before scanning a single byte. A required job
+    # that fails for a reason unrelated to secrets is the worst of both worlds:
+    # it blocks merges while proving nothing, and the obvious way to "fix" it
+    # is continue-on-error, which converts it into a permanently green lane
+    # that scans nothing. The CLI is MIT-licensed and has no such gate.
+    env:
+      GITLEAKS_VERSION: 8.30.1
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      # Two scans, because they cover different things and both have bitten
+      # people: `dir` reads the working tree (what someone browsing the repo
+      # sees), `git` walks every commit (what someone cloning it gets).
+      - name: Scan the working tree
+        run: gitleaks dir . --redact --verbose --exit-code 1
+
+      - name: Scan the full history
+        run: gitleaks git . --redact --verbose --exit-code 1
+
+  lint:
+    name: Lint / ruff
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v7
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install ruff==0.6.9
+
+      - name: ruff check
+        run: ruff check .
+
+  # Fan-in for branch protection. It can only wait on jobs in THIS file -- add a
+  # gate in another workflow and it will not be covered here. That is the exact
+  # trap this harness documents; the authoritative list lives in branch
+  # protection, and this job is a convenience, not the source of truth.
+  ci-success:
+    name: CI Success
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [tests, secrets, lint]
+    steps:
+      - name: Verdict
+        run: |
+          echo "tests=${{ needs.tests.result }}"
+          echo "secrets=${{ needs.secrets.result }}"
+          echo "lint=${{ needs.lint.result }}"
+          for r in "${{ needs.tests.result }}" "${{ needs.secrets.result }}" "${{ needs.lint.result }}"; do
+            case "$r" in
+              success|skipped) ;;
+              *) echo "::error::a required job did not succeed"; exit 1 ;;
+            esac
+          done
+          echo "all required jobs succeeded"

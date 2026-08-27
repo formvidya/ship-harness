@@ -1,0 +1,85 @@
+name: change-review
+
+# Generic change-risk gate. Classifies the PR diff (rules from
+# gates.change_review.risk in .context/config.yml) as LOW (auto-approve) or HIGH
+# (needs a release-approved clearance). The classifier lives in the tested
+# classify.py rather than inline here: the version this was extracted from was a
+# 170-line inline shell script that nothing could unit-test.
+#
+# The bypass is HARDENED, because the original gate was missing this control
+# entirely: the release-approved label is honoured ONLY if applied by a
+# NON-AUTHOR, AFTER the current head commit (exact jq membership, not a
+# substring grep -- a grep also matches "release-approved-pending" and any
+# other label that merely contains the string).
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
+jobs:
+  change-review:
+    name: change-review
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for a VALID release-approved bypass
+        id: bypass
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Approval policy. "true" (TEAM, secure default): label honoured only if
+          # applied by a NON-author after the head commit. "false" (SOLO): the
+          # author may self-clear -- a single maintainer has no second reviewer,
+          # so a hard non-author rule would deadlock every merge. Set per project.
+          REQUIRE_NON_AUTHOR: "true"
+        run: |
+          set -euo pipefail
+          HAS_LABEL=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '[.labels[].name] | index("release-approved") != null')
+          if [ "$HAS_LABEL" != "true" ]; then echo "skip=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if [ "$REQUIRE_NON_AUTHOR" != "true" ]; then
+            echo "release-approved present; self-approval allowed. Skipping classification."
+            echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          EV=$(gh api "repos/$REPO/issues/$PR_NUMBER/events" --paginate \
+            --jq '[.[] | select(.event=="labeled" and .label.name=="release-approved")] | last')
+          LABELER=$(echo "$EV" | jq -r '.actor.login // ""')
+          LABEL_TIME=$(echo "$EV" | jq -r '.created_at // ""')
+          HEAD_TIME=$(gh api "repos/$REPO/commits/$HEAD_SHA" --jq '.commit.committer.date')
+          echo "label by ${LABELER:-?} at ${LABEL_TIME:-?}; head at $HEAD_TIME; author $PR_AUTHOR"
+          if [ "$LABELER" = "$PR_AUTHOR" ]; then
+            echo "::error::release-approved was self-applied by the author -- not allowed."
+            echo "skip=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [ -z "$LABEL_TIME" ] || [[ "$LABEL_TIME" < "$HEAD_TIME" ]]; then
+            echo "::warning::release-approved predates the head commit (stale) -- re-apply."
+            echo "skip=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "Valid bypass by $LABELER. Skipping classification."
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        if: steps.bypass.outputs.skip != 'true'
+        with:
+          python-version: "3.11"
+      - run: pip install pyyaml==6.0.1
+        if: steps.bypass.outputs.skip != 'true'
+
+      - name: Classify change risk
+        if: steps.bypass.outputs.skip != 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python tools/harness/methodology-harness/scripts/classify.py
