@@ -112,6 +112,22 @@ Worth knowing before you adopt it, because each of these has bitten someone:
 - **The templates lag.** They are a known-good starting point, not a mirror of
   every hardening the origin repo has since applied.
 
+## Getting in touch
+
+**Open an issue** — that is the front door, and the fastest way to get an
+answer. Bug reports, adoption questions, and "this limitation bit me" reports
+are all welcome; the limitations above exist because someone hit them.
+
+Pull requests are welcome too. Two things make them easy to accept: keep the
+tests green (`pytest methodology-harness/tests/ context-harness/tests/`), and
+say *why* in the commit message — this project's own thesis is that the
+reasoning behind a change is worth more than the change.
+
+Maintained by [@middle50](https://github.com/middle50) under the
+[FormVidya](https://github.com/formvidya) organization. For anything you would
+rather not put in a public issue — a suspected vulnerability especially —
+message the maintainer through GitHub.
+
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE).
