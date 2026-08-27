@@ -123,10 +123,12 @@ tests green (`pytest methodology-harness/tests/ context-harness/tests/`), and
 say *why* in the commit message — this project's own thesis is that the
 reasoning behind a change is worth more than the change.
 
-Maintained by [@middle50](https://github.com/middle50) under the
-[FormVidya](https://github.com/formvidya) organization. For anything you would
-rather not put in a public issue — a suspected vulnerability especially —
-message the maintainer through GitHub.
+**Found a security problem?** Please do not open a public issue. Use
+[Report a vulnerability](../../security/advisories/new), which is private
+between you and the maintainers. See [SECURITY.md](SECURITY.md) for what to
+expect.
+
+Maintained under the [FormVidya](https://github.com/formvidya) organization.
 
 ## License
 
