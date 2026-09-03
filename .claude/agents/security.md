@@ -157,7 +157,7 @@ Before you write code:
    time differs:
 
    ```
-   python tools/harness/context-harness/ctx/ctx.py query "<area or symbol>"
+   python tools/harness/context-harness/ctx/ctx.py query --service <service> --intent "<what you are about to change>"
    ```
 
    (This is the single source of prior findings. It replaces the old `AGENT_REPORTS.md` scan,

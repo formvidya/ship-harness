@@ -1,4 +1,4 @@
-"""Unit tests for the ops-review gate (feat/ops-review-gate).
+"""Unit tests for the ops-review gate.
 
 Covers the three pieces whose logic must not regress:
   * ops_marker_gate._is_mutating / _read_input — the mutating-vs-read-only

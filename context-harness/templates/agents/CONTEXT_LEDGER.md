@@ -27,7 +27,7 @@ for agents, by the query-before-dev hook.
 | `test_results`, `security_findings` | testing / security | support stage | `ctx set --pr N test_results.passed=...` |
 | `risk_level`, `blast_radius.*` | risk | change-review stage | `ctx set --pr N risk_level=LOW` |
 | `build_retro.*` | retro | final stage | `ctx set --pr N build_retro.gate_verdict=PASS` |
-| assemble + substance check + `## Closed-Loop Outcome` | historian | final stage | `ctx assemble --pr N` |
+| substance check, then `agent_decisions[]` entry, then assemble + `## Closed-Loop Outcome` | historian | final stage | `ctx decide --pr N --agent context-keeper ...` **then** `ctx assemble --pr N` |
 
 ## Two rules for every agent
 

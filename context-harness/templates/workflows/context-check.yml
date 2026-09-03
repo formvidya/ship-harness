@@ -15,7 +15,13 @@ name: Context Check
 on:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, edited]
+    # `ready_for_review` is load-bearing, not tidiness: the run below is
+    # draft-sensitive (see the step comment), and GitHub does not re-run a
+    # workflow on a draft flip unless asked -- `edited` covers title/body/base
+    # only. Without it the last DRAFT run's relaxed PASS stands as this
+    # context's conclusion at merge time and the historian requirement is inert
+    # on every PR while looking enforced.
+    types: [opened, synchronize, reopened, edited, ready_for_review]
 
 concurrency:
   group: context-check-${{ github.ref }}
@@ -46,4 +52,26 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: python tools/harness/context-harness/ctx/check_context_record.py
+        # `--require-historian` is ON by default in CI mode, and on a DRAFT that
+        # is the wrong severity: the Historian reads a change at the END of its
+        # lifecycle, so mid-draft its decision is not late, it is not yet due.
+        # Left unconditional, this required check goes red on every draft push
+        # of every code-root PR and green only at the end -- an always-red check
+        # is one nobody reads, and it buries the real record failures this gate
+        # exists to surface. `--historian-advisory` keeps the axis EVALUATED and
+        # REPORTED but non-fatal while the PR is a draft; every other axis stays
+        # fatal. Fatal again at Ready-flip. (This template has no `merge_group`
+        # trigger; if you add one, it gets the strict gate automatically, because
+        # there is no pull_request object on that event and `draft` is null.)
+        #
+        # `--floor merged` and `--require-historian` are BOTH already the CI-mode
+        # defaults, so naming them changes nothing about what this run does. They
+        # are spelled out anyway, because a required check whose strictness is
+        # visible only in a Python default is a check nobody reviews: someone
+        # reading this workflow to find out what their merge bar actually is
+        # should be able to read it here, and someone relaxing the bar should
+        # have to delete a visible word rather than quietly change a default.
+        run: >-
+          python tools/harness/context-harness/ctx/check_context_record.py
+          --floor merged --require-historian
+          ${{ github.event.pull_request.draft == true && '--historian-advisory' || '' }}

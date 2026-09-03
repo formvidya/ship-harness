@@ -36,6 +36,19 @@ come from ``schema`` (``FLOOR_CHOICES`` / ``DEFAULT_GATE_FLOOR`` /
 ``requirements_for``) and are shared verbatim with ``ctx lint`` — see the
 comment above ``RECORD_NATIVE_FLOOR`` in ``schema.py`` for why.
 
+Historian
+---------
+``--require-historian`` (on by default in CI mode) demands an ``agent_decisions``
+entry from ``context-keeper``. ``--historian-advisory`` keeps that axis
+*evaluated* but demotes it from fatal to a printed WARNING; the workflow passes
+it on DRAFT pushes only. The Historian reads a change at the END of its
+lifecycle, so mid-draft its decision is not late, it is not yet due — and a
+required check that is red on every draft push of every code PR is the
+always-red signal nobody reads. The axis is still reported, so a
+green draft run never reads as "the Historian has been here". Every other axis
+stays fatal on drafts, which is the whole point of this job not being
+draft-gated.
+
 Override
 --------
 Include ``[skip-context]`` (the marker from config) in any commit message in the
@@ -65,7 +78,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from schema import (  # noqa: E402
     DEFAULT_GATE_FLOOR,
     FLOOR_CHOICES,
+    HISTORIAN_AGENT,
     RECORD_NATIVE_FLOOR,
+    is_historian_problem,
     lint_record,
     normalize_floor,
 )
@@ -129,9 +144,36 @@ def main(argv: list[str] | None = None) -> int:
             f"'{RECORD_NATIVE_FLOOR}' in --staged mode (drafting-friendly)."
         ),
     )
+    parser.add_argument(
+        "--require-historian",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            f"require an agent_decisions entry from '{HISTORIAN_AGENT}'. Default: on in CI mode "
+            f"(the record is about to merge, so it is due an author-independent read), off in "
+            f"--staged mode (the Historian runs at the end of a change, not while you draft it)."
+        ),
+    )
+    parser.add_argument(
+        "--historian-advisory",
+        action="store_true",
+        help=(
+            "evaluate the historian requirement but report it as a non-fatal WARNING instead of "
+            "failing. For DRAFT pushes: the Historian runs at the end of a change, so its absence "
+            "mid-draft is the expected state, not a defect. The axis is still reported, so a green "
+            "draft run never reads as 'the Historian has been here'."
+        ),
+    )
     args = parser.parse_args(argv)
     floor = args.floor or (RECORD_NATIVE_FLOOR if args.staged else DEFAULT_GATE_FLOOR)
     lint_floor = normalize_floor(floor)
+    require_historian = args.require_historian if args.require_historian is not None else not args.staged
+    # --historian-advisory sets the SEVERITY of the historian finding, not whether the
+    # axis is looked at, so it implies evaluation even under an explicit
+    # --no-require-historian: reporting-and-not-failing is strictly more informative
+    # than not looking, and a green draft run that never mentions the Historian is the
+    # silent skip this flag removed.
+    evaluate_historian = require_historian or args.historian_advisory
 
     cfg = load_config()
     base = os.environ.get("BASE_SHA")
@@ -166,6 +208,7 @@ def main(argv: list[str] | None = None) -> int:
     record_changed = any(_is_record_path(cfg, f) for f in changed)
 
     failures: list[str] = []
+    deferred: list[str] = []
 
     # 1. A record file must be touched by this PR.
     if pr_number is not None:
@@ -181,7 +224,15 @@ def main(argv: list[str] | None = None) -> int:
                 f"context record {rel} exists but was not updated in this PR. A change to code must update its record."
             )
         else:
-            problems = lint_record(record, floor=lint_floor)
+            problems = lint_record(record, floor=lint_floor, require_historian=evaluate_historian)
+            if args.historian_advisory:
+                # Split the historian axis out of the flat problem list. `schema` owns
+                # both the message and the predicate, so the gate never re-derives WHEN
+                # the requirement bites -- only what it costs. A second copy of the floor
+                # gating here would rebuild the local-vs-CI drift that centralising it
+                # was meant to prevent.
+                deferred = [msg for msg in problems if is_historian_problem(msg)]
+                problems = [msg for msg in problems if not is_historian_problem(msg)]
             if problems:
                 failures.append(f"{rel} failed lint (floor={floor}):\n      - " + "\n      - ".join(problems))
     elif not record_changed:
@@ -196,6 +247,28 @@ def main(argv: list[str] | None = None) -> int:
         status = "FAIL" if failures else "PASS"
         print(f"  [{status}] {root}  ({len(files)} file(s): {sample})")
 
+    if deferred:
+        print("\nDeferred to Ready-flip (WARNING -- does not fail this run):")
+        for msg in deferred:
+            print(f"  -> {msg}")
+        print("  EXPECTED until the Historian runs: context-keeper reads a change at the END")
+        print("  of its lifecycle, so on a draft its absence is the normal state and not a")
+        print("  defect. Failing here would be red on every draft push of every code PR,")
+        print("  which is how a gate becomes wallpaper nobody reads. The SAME requirement is")
+        print("  FATAL once this PR is marked Ready for review, and in the merge queue, so")
+        print("  it must be satisfied before merge either way.")
+        # The annotation is what a reviewer sees on the PR without opening the run
+        # log, so it has to carry the "not broken" reading on its own. Emitted after
+        # the human block: the raw ::warning:: line also lands in the log, and
+        # interleaving one per finding breaks up the paragraph a person reads.
+        print(
+            "::warning title=Historian decision outstanding (expected on a draft)::"
+            "This record has no context-keeper decision yet. That is EXPECTED until the "
+            "Historian runs and does NOT mean the PR is broken -- the agent reads a change "
+            "at the end of its lifecycle. It becomes fatal when this PR is marked Ready "
+            "for review, so run the context-keeper agent before flipping it."
+        )
+
     if failures:
         print("\ncontext-check: FAIL")
         for fmsg in failures:
@@ -207,7 +280,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    print("\ncontext-check: PASS")
+    note = f" ({len(deferred)} deferred to Ready-flip, see above)" if deferred else ""
+    print(f"\ncontext-check: PASS{note}")
     return 0
 
 

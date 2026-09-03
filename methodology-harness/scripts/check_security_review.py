@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ops security-review gate (feat/ops-review-gate — the binding CI teeth).
+"""Ops security-review gate -- the binding CI teeth.
 
 The durable, non-bypassable half of the ops-review gate. The local Stop hook
 (stop_review_gate.py) can be bypassed with ``OPS_REVIEW_BYPASS=1`` and only runs

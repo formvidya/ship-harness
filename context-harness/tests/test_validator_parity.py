@@ -1,4 +1,4 @@
-"""Parity tests for the two context-record validators (fix/ctx-validator-parity).
+"""Parity tests for the two context-record validators.
 
 Two entry points validate the same record:
 
@@ -66,6 +66,16 @@ _RECORD_HEAD = textwrap.dedent(
       rationale: two floors that disagree are two gates, and only one of them blocks merge
     """
 )
+# The Historian's decision. Kept separate so a test can withhold it: the
+# `require_historian` flag is the one requirement whose absence used to be
+# invisible in both validators.
+_HISTORIAN_DEC = textwrap.dedent(
+    f"""    - decision_id: DEC-{_PR}-2
+      agent: context-keeper
+      decision: read the record against the diff and corrected two claims
+      rationale: the author is the only other reader of their own record, so nothing else catches a plausible false claim
+    """
+)
 _MERGED_ONLY_FM = textwrap.dedent(
     """\
     risk_level: LOW
@@ -94,10 +104,10 @@ def _git(repo: Path, *args: str) -> str:
     return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
 
 
-def _write_record(repo: Path, *, merged_fields: bool) -> Path:
+def _write_record(repo: Path, *, merged_fields: bool, historian: bool = True) -> Path:
     rec = repo / "docs" / "context" / "records" / f"{_CTX_ID}.md"
     rec.parent.mkdir(parents=True, exist_ok=True)
-    fm = _RECORD_HEAD + (_MERGED_ONLY_FM if merged_fields else "")
+    fm = _RECORD_HEAD + (_HISTORIAN_DEC if historian else "") + (_MERGED_ONLY_FM if merged_fields else "")
     rec.write_text(fm + _BODY, encoding="utf-8")
     return rec
 
@@ -113,12 +123,13 @@ class _Fixture:
     def __truediv__(self, other):  # so tests can write `repo / ".claude" / ...`
         return self.root / other
 
-    def commit_record(self, *, merged_fields: bool) -> None:
-        """Write the record (with or without the merged-only frontmatter),
-        commit it alongside a code-root change, and point HEAD_SHA at it."""
+    def commit_record(self, *, merged_fields: bool, historian: bool = True) -> None:
+        """Write the record (with or without the merged-only frontmatter, with
+        or without the Historian's decision), commit it alongside a code-root
+        change, and point HEAD_SHA at it."""
         self._n += 1
         (self.root / "src" / "app.py").write_text(f"BASE = {self._n}\n", encoding="utf-8")
-        _write_record(self.root, merged_fields=merged_fields)
+        _write_record(self.root, merged_fields=merged_fields, historian=historian)
         _git(self.root, "add", "-A")
         _git(self.root, "commit", "-q", "-m", f"change {self._n} (merged_fields={merged_fields})")
         self._monkeypatch.setenv("HEAD_SHA", _git(self.root, "rev-parse", "HEAD"))
@@ -143,13 +154,13 @@ def repo(tmp_path, monkeypatch):
     _git(tmp_path, "commit", "-q", "-m", "base")
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("PR_NUMBER", "7")
+    monkeypatch.setenv("PR_NUMBER", str(_PR))
     monkeypatch.setenv("BASE_SHA", _git(tmp_path, "rev-parse", "HEAD"))
     return _Fixture(tmp_path, monkeypatch)
 
 
 def _ctx_lint(*floor_args: str) -> int:
-    return ctx_cli.main(["lint", "--pr", "7", *floor_args])
+    return ctx_cli.main(["lint", "--pr", str(_PR), *floor_args])
 
 
 def _gate(*floor_args: str) -> int:
@@ -194,6 +205,87 @@ def test_populated_record_passes_both_validators(repo, capsys):
     assert _gate("--floor", "merged") == 0
     assert _ctx_lint() == 0
     assert _gate() == 0
+    capsys.readouterr()
+
+
+# ── the historian requirement, in both validators ────────────────────────
+def test_missing_historian_decision_fails_both_validators(repo, capsys):
+    """A record complete in every other respect, read by nobody but its author."""
+    repo.commit_record(merged_fields=True, historian=False)
+
+    assert _ctx_lint("--floor", "merged") == 1
+    ctx_out = capsys.readouterr().out
+    assert _gate("--floor", "merged") == 1
+    gate_out = capsys.readouterr().out
+
+    for out in (ctx_out, gate_out):
+        assert schema.HISTORIAN_AGENT in out
+
+
+def test_missing_historian_decision_fails_both_at_the_default_floor(repo, capsys):
+    """The defaults must agree, not just the explicit flag -- that was the
+    shape of the local-vs-CI drift this suite exists to prevent, and a new
+    requirement can reproduce it."""
+    repo.commit_record(merged_fields=True, historian=False)
+
+    assert _ctx_lint() == 1
+    ctx_out = capsys.readouterr().out
+    assert _gate() == 1
+    gate_out = capsys.readouterr().out
+
+    for out in (ctx_out, gate_out):
+        assert schema.HISTORIAN_AGENT in out
+
+
+def test_the_gate_goes_green_once_the_historian_has_filed(repo, capsys):
+    """The mirror: a gate that never passes is not a gate, it is an outage."""
+    repo.commit_record(merged_fields=True, historian=True)
+
+    assert _ctx_lint("--floor", "merged") == 0
+    assert _gate("--floor", "merged") == 0
+    capsys.readouterr()
+
+
+def test_staged_mode_does_not_demand_the_historian(repo, capsys):
+    """Drafting stays unblocked -- the Historian reads a change at the END, so
+    a pre-commit hook demanding it would block the very commits that produce
+    the work under review. `--floor merged` isolates the axis: only the staged
+    default for require_historian can make the first assertion pass."""
+    repo.commit_record(merged_fields=True, historian=False)
+    (repo / "src" / "app.py").write_text("BASE = staged", encoding="utf-8")
+    _git(repo.root, "add", "-A")
+
+    assert _gate("--staged", "--floor", "merged") == 0
+    assert _gate("--staged", "--floor", "merged", "--require-historian") == 1
+    assert schema.HISTORIAN_AGENT in capsys.readouterr().out
+
+
+def test_ctx_lint_demands_the_historian_only_when_targeting_a_pr(repo, capsys):
+    """`--pr N` is the pre-merge question and must match CI. The bare sweep is
+    a historical health report over records written before the rule existed;
+    defaulting it on there prints ~347 failures and trains everyone to ignore
+    the command."""
+    repo.commit_record(merged_fields=True, historian=False)
+
+    assert ctx_cli.main(["lint", "--pr", str(_PR)]) == 1
+    assert schema.HISTORIAN_AGENT in capsys.readouterr().out
+
+    assert ctx_cli.main(["lint"]) == 0
+    assert "historian not required" in capsys.readouterr().out
+
+
+def test_assemble_will_not_certify_a_record_the_historian_never_read(repo, capsys):
+    """CONTEXT-OK is what the release-manager reads as 'the record is good'."""
+    repo.commit_record(merged_fields=True, historian=False)
+
+    assert ctx_cli.main(["assemble", "--pr", str(_PR)]) == 1
+    out = capsys.readouterr().out
+    assert "CONTEXT-INCOMPLETE" in out and schema.HISTORIAN_AGENT in out
+    assert not (repo / ".claude" / f"context-recorded-{_PR}").exists()
+
+    repo.commit_record(merged_fields=True, historian=True)
+    assert ctx_cli.main(["assemble", "--pr", str(_PR)]) == 0
+    assert (repo / ".claude" / f"context-recorded-{_PR}").is_file()
     capsys.readouterr()
 
 
@@ -266,7 +358,7 @@ def test_gate_default_floor_is_merged():
 
 def test_ctx_lint_default_floor_matches_the_gate():
     """The CLI default is read off the parser, so lowering it fails this test."""
-    args = ctx_cli.build_parser().parse_args(["lint", "--pr", "7"])
+    args = ctx_cli.build_parser().parse_args(["lint", "--pr", str(_PR)])
     assert args.floor == schema.DEFAULT_GATE_FLOOR
 
 
@@ -274,13 +366,116 @@ def test_ctx_assemble_validates_at_the_gate_floor(repo, capsys):
     """A CONTEXT-OK marker must mean 'this will pass Context Check'. Assemble
     used to lint at the record's own status and green-lit records CI rejected."""
     repo.commit_record(merged_fields=False)
-    assert ctx_cli.main(["assemble", "--pr", "7"]) == 1
+    assert ctx_cli.main(["assemble", "--pr", str(_PR)]) == 1
     out = capsys.readouterr().out
     assert "CONTEXT-INCOMPLETE" in out
     assert "test_results" in out
-    assert not (repo / ".claude" / "context-recorded-7").exists()
+    assert not (repo / ".claude" / f"context-recorded-{_PR}").exists()
 
     repo.commit_record(merged_fields=True)
-    assert ctx_cli.main(["assemble", "--pr", "7"]) == 0
-    assert (repo / ".claude" / "context-recorded-7").is_file()
+    assert ctx_cli.main(["assemble", "--pr", str(_PR)]) == 0
+    assert (repo / ".claude" / f"context-recorded-{_PR}").is_file()
     capsys.readouterr()
+
+
+# ── the draft carve-out: one axis deferred, every other axis still fatal ─────
+# `--require-historian` on a required check that is NOT draft-gated went red on
+# every draft push of every code-root PR, because context-keeper reads a change
+# at the END of its lifecycle. Always-red is how a broken CI lane stays
+# invisible -- nobody reads a signal that is red every time -- and here it would
+# bury the very failures the no-draft-gating decision exists to surface early.
+# `--historian-advisory` is what the workflow passes while the PR is a draft.
+def test_draft_advisory_defers_the_historian_instead_of_failing(repo, capsys):
+    """The pair, on one record: advisory PASSES where the strict gate FAILS."""
+    repo.commit_record(merged_fields=True, historian=False)
+
+    assert _gate("--floor", "merged") == 1
+    capsys.readouterr()
+    assert _gate("--floor", "merged", "--historian-advisory") == 0
+
+
+def test_draft_advisory_still_names_the_outstanding_decision(repo, capsys):
+    """A green draft run must never read as 'the Historian has been here'.
+
+    That would put back the SILENT SKIP this gate removed, wearing a draft.
+    The axis stays reported: the agent is named, the run says the wait is
+    EXPECTED so a reviewer does not read it as a broken PR, and the summary
+    line itself carries the deferral rather than an unqualified PASS."""
+    repo.commit_record(merged_fields=True, historian=False)
+
+    assert _gate("--floor", "merged", "--historian-advisory") == 0
+    out = capsys.readouterr().out
+    assert schema.HISTORIAN_AGENT in out
+    assert "EXPECTED" in out
+    assert "Ready for review" in out
+    assert "::warning" in out
+    assert "context-check: PASS (1 deferred to Ready-flip" in out
+
+
+def test_draft_advisory_relaxes_the_historian_axis_and_nothing_else(repo, capsys):
+    """The load-bearing negative. If the flag relaxed the whole record lint,
+    every one of these tests would still pass while the gate stopped gating --
+    a record hollow at the merged floor must STILL fail on a draft. That is the
+    entire reason this job is not draft-gated in the first place."""
+    repo.commit_record(merged_fields=False, historian=False)
+
+    assert _gate("--floor", "merged", "--historian-advisory") == 1
+    out = capsys.readouterr().out
+    assert "test_results" in out and "risk_level" in out
+    assert "context-check: FAIL" in out
+    # ...and the deferred axis is still reported alongside the failure, not
+    # swallowed by it: the reader needs the whole state, not the fatal half.
+    assert schema.HISTORIAN_AGENT in out
+
+
+def test_draft_advisory_is_quiet_when_the_historian_has_filed(repo, capsys):
+    """The mirror. A warning printed unconditionally is decoration, and would
+    make every assertion above satisfiable by a `print()` with no logic."""
+    repo.commit_record(merged_fields=True, historian=True)
+
+    assert _gate("--floor", "merged", "--historian-advisory") == 0
+    out = capsys.readouterr().out
+    assert "::warning" not in out
+    assert "deferred" not in out
+    assert out.rstrip().endswith("context-check: PASS")
+
+
+def test_advisory_looks_at_the_axis_even_under_no_require_historian(repo, capsys):
+    """`--historian-advisory` sets the SEVERITY, not whether we look. Reporting
+    and not failing is strictly more informative than not looking, so the
+    explicit off-switch must not silence it into a bare green."""
+    repo.commit_record(merged_fields=True, historian=False)
+
+    assert _gate("--floor", "merged", "--no-require-historian") == 0
+    assert schema.HISTORIAN_AGENT not in capsys.readouterr().out
+
+    assert _gate("--floor", "merged", "--no-require-historian", "--historian-advisory") == 0
+    assert schema.HISTORIAN_AGENT in capsys.readouterr().out
+
+
+def test_the_merge_verdict_is_untouched_by_the_draft_carve_out(repo, capsys):
+    """The gate's founding criterion -- `ctx lint --pr N` is the documented
+    local equivalent of the gate -- survives. The carve-out is a CI TIMING concession
+    keyed to draft state, not a second standard: the moment the flag is absent
+    (Ready-flip, merge_group, and the local command at any time) both validators
+    reach the same verdict on the same record."""
+    repo.commit_record(merged_fields=True, historian=False)
+
+    assert _gate("--floor", "merged", "--historian-advisory") == 0
+    capsys.readouterr()
+
+    assert _ctx_lint("--floor", "merged") == 1
+    assert schema.HISTORIAN_AGENT in capsys.readouterr().out
+    assert _gate("--floor", "merged") == 1
+    assert schema.HISTORIAN_AGENT in capsys.readouterr().out
+
+
+def test_staged_mode_is_unaffected_by_the_advisory_flag(repo, capsys):
+    """Pre-commit was already off; the new flag must not turn it into a source
+    of noise on every commit a builder makes."""
+    repo.commit_record(merged_fields=True, historian=False)
+    (repo / "src" / "app.py").write_text("BASE = staged", encoding="utf-8")
+    _git(repo.root, "add", "-A")
+
+    assert _gate("--staged", "--floor", "merged") == 0
+    assert schema.HISTORIAN_AGENT not in capsys.readouterr().out

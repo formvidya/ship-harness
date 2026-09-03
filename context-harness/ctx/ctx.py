@@ -48,6 +48,7 @@ from schema import (  # noqa: E402
     DEFAULT_GATE_FLOOR,
     FLOOR_CHOICES,
     FRONTMATTER_RE,
+    HISTORIAN_AGENT,
     RECORD_NATIVE_FLOOR,
     lint_record,
     normalize_floor,
@@ -520,6 +521,15 @@ def _write_if_unchanged(path: Path, fm: dict, body: str, before: bytes) -> bool:
 
 def cmd_lint(cfg: Config, args) -> int:
     floor = getattr(args, "floor", DEFAULT_GATE_FLOOR)
+    # `--pr N` asks the pre-merge question -- "will this PR pass Context Check?"
+    # -- so it must reach the gate's verdict, historian requirement included, or
+    # we have rebuilt the local-vs-CI drift with a new field. A bare sweep or an
+    # explicit `path` is a historical health report over records mostly written
+    # before the rule existed; defaulting it on there would print ~347 failures
+    # and teach everyone to ignore the command.
+    require_historian = getattr(args, "require_historian", None)
+    if require_historian is None:
+        require_historian = bool(args.pr)
     if args.path:
         targets = [Path(args.path)]
     elif args.pr:
@@ -535,7 +545,7 @@ def cmd_lint(cfg: Config, args) -> int:
             print(f"  [FAIL] {t}: file not found")
             failed += 1
             continue
-        problems = lint_record(t, floor=normalize_floor(floor))
+        problems = lint_record(t, floor=normalize_floor(floor), require_historian=require_historian)
         rel = t.relative_to(cfg.repo_root).as_posix() if t.is_absolute() else str(t)
         if problems:
             failed += 1
@@ -546,7 +556,10 @@ def cmd_lint(cfg: Config, args) -> int:
             print(f"  [PASS] {rel}")
     # The floor is printed because it decides the verdict: the default matches
     # the Context Check CI gate, and a lower floor is a strictly weaker check.
-    print(f"\nctx lint: {len(targets) - failed}/{len(targets)} valid (floor={floor})")
+    # Same reason the historian requirement is printed when it is NOT applied:
+    # a sweep that says 325/351 valid must not be mistaken for a merge verdict.
+    historian_note = "" if require_historian else ", historian not required"
+    print(f"\nctx lint: {len(targets) - failed}/{len(targets)} valid (floor={floor}{historian_note})")
     return 1 if failed else 0
 
 
@@ -567,7 +580,11 @@ def cmd_assemble(cfg: Config, args) -> int:
     if not path.is_file():
         print(f"ctx assemble: CONTEXT-INCOMPLETE -- no record at {rel}")
         return 1
-    problems = lint_record(path, floor=DEFAULT_GATE_FLOOR)
+    # require_historian=True: assemble IS the Historian's finalize step, and the
+    # marker it writes is what the release-manager reads as "the record is good".
+    # A CONTEXT-OK on a record the Historian never touched is the exact claim
+    # this change exists to stop making.
+    problems = lint_record(path, floor=DEFAULT_GATE_FLOOR, require_historian=True)
     if problems:
         print(f"ctx assemble: CONTEXT-INCOMPLETE -- {rel} failed lint (floor={DEFAULT_GATE_FLOOR}):")
         for p in problems:
@@ -814,6 +831,15 @@ def build_parser() -> argparse.ArgumentParser:
             f"Context Check CI gate imposes, requiring frontmatter {list(_fields)} and sections "
             f"{['## ' + s for s in _sections]}). '{RECORD_NATIVE_FLOOR}' imposes no floor and lints at "
             f"the record's own status, which is a strictly weaker check than CI."
+        ),
+    )
+    pl.add_argument(
+        "--require-historian",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            f"require an agent_decisions entry from '{HISTORIAN_AGENT}'. Default: on with --pr "
+            f"(matching the CI gate), off for a whole-ledger sweep."
         ),
     )
     pl.add_argument("path", nargs="?")

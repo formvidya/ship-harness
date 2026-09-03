@@ -66,13 +66,46 @@ class RecordError(ValueError):
     pass
 
 
+# ── YAML loader selection ────────────────────────────────────────────────────
+# Use libyaml's C loader when the installed PyYAML was built with it.
+#
+# WHY THIS EXISTS, MEASURED 2026-09-01. Folding all 369 records took 4.7s, and
+# 99% of that was this one call -- the fold itself (decisions, topics, patterns)
+# is 13ms. `ctx query` runs on a BLOCKING pre-edit hook, so that 4.7s is paid
+# before the first edit on every branch, and it grows linearly: ~13s at 1,000
+# records, ~32s at 2,500.
+#
+# Same corpus, same parse, measured back to back:
+#     pure-Python SafeLoader   4.55s
+#     C CSafeLoader            0.25s      <- 18x
+#
+# INSTALLING LIBYAML IS NOT ENOUGH ON ITS OWN, which is the trap worth naming:
+# `yaml.safe_load()` hardcodes the pure-Python SafeLoader whatever is installed.
+# The C extension was present and unused, and the timing was unchanged, until
+# the code opted in here. A "fix" applied only to the environment would have
+# been inert with nothing to show for it.
+#
+# Falls back silently when the C extension is absent -- CI pins pyyaml==6.0.1,
+# and a wheel without the extension must still work, just slower. Correctness is
+# identical: CSafeLoader is the same YAML 1.1 safe subset, implemented in C.
+try:
+    from yaml import CSafeLoader as _Loader  # type: ignore[attr-defined]
+except ImportError:  # pragma: no cover - depends on how PyYAML was built
+    from yaml import SafeLoader as _Loader
+
+
+def load_yaml(text: str):
+    """Parse a YAML document with the fastest available safe loader."""
+    return yaml.load(text, Loader=_Loader)
+
+
 def parse_record(path: Path) -> Record:
     text = path.read_text(encoding="utf-8")
     m = FRONTMATTER_RE.match(text)
     if not m:
         raise RecordError(f"{path}: no YAML frontmatter block (expected leading '---').")
     try:
-        fm = yaml.safe_load(m.group(1)) or {}
+        fm = load_yaml(m.group(1)) or {}
     except yaml.YAMLError as e:
         raise RecordError(f"{path}: frontmatter is not valid YAML: {e}") from e
     if not isinstance(fm, dict):
@@ -107,6 +140,36 @@ DEFAULT_GATE_FLOOR = "merged"
 
 #: The single ``--floor`` choice list. Both argparsers import this.
 FLOOR_CHOICES = (RECORD_NATIVE_FLOOR, *LIFECYCLE)
+
+#: The agent whose decision, present in a record, is the deterministic trace
+#: that the Historian read it. The Historian (``.claude/agents/context-keeper``)
+#: is the ledger's only author-INDEPENDENT reader: every other decision in a
+#: record is filed by the same agent that made the change it describes, so a
+#: record with no ``context-keeper`` entry has been checked by nobody but its
+#: author.
+#:
+#: WHAT REQUIRING THIS PROVES, AND WHAT IT DOES NOT. It does not prove a review
+#: happened. Nothing deterministic can: the check reads a YAML field and cannot
+#: tell who typed it. One observed record is the case in point -- it passed
+#: ``lint_record`` cleanly while carrying four material claims that flattered
+#: the change and were false, every one of them found by a reading agent and
+#: none of them findable here. What the requirement does buy is narrower and
+#: still worth the line: skipping the Historian stops being a SILENT OMISSION
+#: -- the actual observed failure, where the author simply never invokes it and
+#: nothing notices -- and becomes a deliberate act of writing a false
+#: attribution into a file that is itself under review.
+HISTORIAN_AGENT = "context-keeper"
+
+#: The opening words of the problem :func:`lint_record` emits when that decision
+#: is absent. Callers that need to treat the historian axis differently from
+#: every other lint problem -- the Context Check gate demotes it to a warning on
+#: DRAFT pushes, because the Historian runs at the END of a change and a red
+#: that is expected on every draft push is exactly the always-red noise nobody
+#: reads -- must be able to pick it out of the flat problem list. The message is
+#: BUILT from this constant rather than merely starting with it by convention,
+#: so :func:`is_historian_problem` cannot silently stop matching if the wording
+#: is reworded later.
+HISTORIAN_PROBLEM_PREFIX = f"no agent_decisions entry from '{HISTORIAN_AGENT}'"
 
 
 # ── lifecycle-aware required fields ─────────────────────────────────────────
@@ -193,7 +256,7 @@ def _has_nonempty_section(body: str, heading: str) -> bool:
     return any(not _PLACEHOLDER_LINE.match(ln) for ln in lines)
 
 
-def lint_record(path: Path, floor: str | None = None) -> list[str]:
+def lint_record(path: Path, floor: str | None = None, *, require_historian: bool = False) -> list[str]:
     """Return a list of human-readable problems. Empty list == valid.
 
     ``floor`` optionally names a lifecycle state whose requirements apply even
@@ -201,6 +264,17 @@ def lint_record(path: Path, floor: str | None = None) -> list[str]:
     ``floor="merged"`` so a record must be substance-complete *before* merge —
     otherwise the merged-level floors only ever bind after the fact (or, as
     observed, never, because nothing advanced ``status``).
+
+    ``require_historian`` additionally demands an :data:`HISTORIAN_AGENT`
+    decision. It is a keyword flag rather than a merged-floor entry in
+    :data:`_REQUIRED_FRONTMATTER` on purpose: the requirement is about the
+    process a NEW change goes through, not a property the 351 records written
+    before it existed should be retroactively judged against. Folding it into
+    the floor would have put ~347 of them into ``lifecycle-sync``'s curation
+    queue and turned a bare ``ctx lint`` from 325/351 to 4/351 -- a report
+    nobody would read twice, which is how a gate becomes decoration. It still
+    only bites once the effective lifecycle reaches ``merged``, so "a lower
+    floor is a strictly weaker check" stays true.
     """
     try:
         rec = parse_record(path)
@@ -249,6 +323,17 @@ def lint_record(path: Path, floor: str | None = None) -> list[str]:
             if not dec.get(k):
                 problems.append(f"agent_decision {dec.get('decision_id', '?')} missing '{k}'")
 
+    # Historian review. Gated on the merged floor so the weaker-floor invariant
+    # holds; see the flag's rationale in the docstring and the constant's
+    # comment for the (narrow) claim this actually supports.
+    if require_historian and "merged" in _lifecycle_at_or_before(effective):
+        if not _has_historian_decision(rec.agent_decisions):
+            problems.append(
+                f"{HISTORIAN_PROBLEM_PREFIX}: this record has been read by "
+                f"nobody but its author. Run the context-keeper agent over the PR and let it file "
+                f"its own decision -- do not write one on its behalf."
+            )
+
     # Closed-loop outcome verdict sanity.
     outcome = fm.get("outcome") or {}
     for d in outcome.get("decisions") or []:
@@ -265,6 +350,32 @@ def lint_record(path: Path, floor: str | None = None) -> list[str]:
     problems.extend(_duplicate_id_problems(outcome.get("decisions") or [], "outcome.decisions"))
 
     return problems
+
+
+def is_historian_problem(problem: str) -> bool:
+    """True if ``problem`` is the missing-Historian-decision problem.
+
+    Lets a caller split the historian axis out of ``lint_record``'s flat list
+    without re-deriving when the requirement bites -- the floor gating above is
+    the single definition, and a second copy of it in the gate is exactly the
+    local-vs-CI drift centralising that definition here was meant to prevent.
+    """
+    return problem.startswith(HISTORIAN_PROBLEM_PREFIX)
+
+
+def _has_historian_decision(decisions: Any) -> bool:
+    """True if any decision is attributed to :data:`HISTORIAN_AGENT`.
+
+    Case- and whitespace-insensitive: the ledger already carries both ``gm``
+    and ``GM``, so an exact-match test would fail open on a capitalisation.
+    Deliberately NOT alias-tolerant -- one canonical spelling, the agent's
+    registered name, or the set of accepted spellings drifts the way the
+    ``flutter`` / ``flutter-engineer`` / ``mobile-engineer`` attributions did.
+    """
+    for dec in decisions if isinstance(decisions, list) else []:
+        if isinstance(dec, dict) and str(dec.get("agent") or "").strip().lower() == HISTORIAN_AGENT:
+            return True
+    return False
 
 
 def _duplicate_id_problems(entries: Any, where: str) -> list[str]:

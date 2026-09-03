@@ -1,4 +1,4 @@
-"""Integration tests for ``ctx lifecycle-sync`` (fix/ctx-substance-floors).
+"""Integration tests for ``ctx lifecycle-sync``.
 
 Builds a throwaway git repo with a minimal .context/config.yml, a merged-PR
 style commit (subject containing "(#N)"), and records in various states, then

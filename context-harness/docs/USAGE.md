@@ -49,11 +49,20 @@ python tools/harness/context-harness/ctx/ctx.py lint            # all records
 Exit 0 = valid, 1 = problems (listed per record). Required fields escalate with
 `status` (see `SCHEMA.md`).
 
-**This is the local equivalent of the `Context Check` CI gate.** It defaults to
-`--floor merged` — the same floor, from the same requirements table, that
-`check_context_record.py` imposes on a PR — so a green `ctx lint` means a green
-gate. Pass `--floor status` to lint at the record's own `status` instead; that
-is a weaker check and will let a record through that CI rejects.
+**`ctx lint --pr N` is the local equivalent of the `Context Check` CI gate.** It
+defaults to `--floor merged` — the same floor, from the same requirements table,
+that `check_context_record.py` imposes on a PR — and it likewise requires a
+`context-keeper` decision, so a green `ctx lint --pr N` means a green gate. Pass
+`--floor status` to lint at the record's own `status` instead; that is a weaker
+check and will let a record through that CI rejects.
+
+The **bare sweep** (`ctx lint`, no `--pr`) deliberately does *not* require the
+Historian, and says `historian not required` in its summary when it did not. The
+requirement is a rule about how records are written from now on, and applying it
+to a whole back catalogue would turn every record written before the rule into a
+failure — a report with hundreds of entries nobody can act on, which is how a
+gate becomes wallpaper. Use the sweep to find records that are malformed; use
+`--pr N` to answer "can this merge?".
 
 ## `ctx assemble` — Historian finalize
 
@@ -64,8 +73,20 @@ python tools/harness/context-harness/ctx/ctx.py assemble --pr 142
 Deterministic (no model calls): validates the record is schema-complete for
 its lifecycle. On `CONTEXT-OK` it writes `.claude/context-recorded-142` (the
 marker the release-manager checks). On `CONTEXT-INCOMPLETE` it lists the missing
-sections and exits 1. The substance check is the context-keeper agent's
-separate advisory step, not part of `assemble`.
+sections and exits 1.
+
+`assemble` also requires the record to carry a decision attributed to
+`context-keeper`, because this command *is* the Historian's finalize step and
+the marker it writes is what the release-manager trusts. Every other decision in
+a record is filed by the agent that made the change it describes, so without
+this a record can reach merge having been read by nobody but its author.
+
+What that requirement does and does not prove is worth being precise about: it
+establishes that an author-independent reader was invited and left a signature.
+It cannot establish that the reading was any good. Judging the *substance* of
+the record — whether a claim is one the diff actually supports — remains the
+context-keeper agent's own job, and no deterministic gate can do it, because a
+well-written false claim and a well-written true one are the same shape.
 
 ## `ctx bootstrap` — render agent profiles from config
 
